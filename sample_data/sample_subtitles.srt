@@ -1,0 +1,11 @@
+1
+00:00:00,000 --> 00:00:04,000
+In July two thousand nineteen, a television prop buyer in Vancouver
+
+2
+00:00:04,000 --> 00:00:06,000
+Prompt 001: walked into an Asian grocery store
+
+3
+00:00:06,000 --> 00:00:09,000
+Prompt 123: looking for something that did not belong on Earth.
