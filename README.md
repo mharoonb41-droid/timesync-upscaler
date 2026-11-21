@@ -11,10 +11,16 @@ Built with **PySide6** (Qt for Python), **FFmpeg Lanczos upscaling engine**, and
 - **Single Complete Video Output (Zero Chunk Clutter):**
   - All intermediate MPEG-TS processing segments are rendered in private OS temporary storage and automatically cleaned up.
   - Combines all scenes into **exactly ONE final `.mp4` video** with voiceover audio embedded.
+- **AMD & Intel Processor & Hardware Acceleration:**
+  - **Automatic Processor Detection:** Detects host CPU vendor (AMD vs. Intel), model name, architecture (x64/ARM64), and logical thread count directly on launch.
+  - **AMD AMF (Advanced Media Framework):** First-class support for AMD Radeon GPUs and Ryzen APUs with `h264_amf`, `hevc_amf`, and `av1_amf` hardware encoding using dedicated low-latency CQP tuning.
+  - **Intel QuickSync Video (QSV):** Hardware-accelerated `h264_qsv`, `hevc_qsv`, and `av1_qsv` encoding for Intel Core & Arc platforms.
+  - **NVIDIA NVENC:** High-performance `h264_nvenc` and `hevc_nvenc` encoding.
+  - **Multi-Core CPU Software (`libx264` / `libx265`):** Uses AVX2/AVX-512 multi-threading (`-threads 0`) optimized across all available cores for both AMD Ryzen and Intel processors with seamless automatic fallback.
 - **Scroll-Safe UI & Fluid Responsiveness:**
   - Sidebar wrapped in a smooth `QScrollArea` to ensure components **never overlap** on any screen resolution or Windows display scaling factor (125%, 150%, 175%).
   - **Scroll-Safe Dropdowns (`NoScrollComboBox` / `NoScrollSlider` / `NoScrollSpinBox`):** Scrolling through the panel with the mouse wheel **never accidentally changes** your selected resolution, frame rate, encoder, or quality settings!
-  - **"↺ Restore Default Settings" button:** Instantly resets all export settings to recommended production defaults (2K QHD 1440p, 30 fps, Fit scaling, CRF 18, optimal CPU workers).
+  - **"↺ Restore Default Settings" button:** Instantly resets all export settings to recommended production defaults based on detected CPU/GPU hardware.
 - **Multiprocessing Pipeline (GIL-Bypassed):**
   - **Stage 1 (Parallel Scene Processing):** Distributes individual image and video segments across CPU worker processes (`ProcessPoolExecutor`) to scale, frame-accurately pad/trim, apply Ken Burns motion, and encode segments concurrently.
   - **Stage 2 (Fast Merge):** Concatenates all rendered segments instantly via FFmpeg's `concat` demuxer (stream copy without re-encoding) and muxes voiceover audio.

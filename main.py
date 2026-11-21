@@ -32,13 +32,16 @@ def run_cli(args: argparse.Namespace):
     print(" TimeSync-Upscaler Single-Video CLI Engine")
     print("==================================================")
 
-    # 1. Verify FFmpeg
+    # 1. Verify FFmpeg & Hardware
     try:
         ffmpeg_bin = FFmpegEngine.get_ffmpeg_path()
         print(f"[*] FFmpeg binary: {ffmpeg_bin}")
     except RuntimeError as e:
         print(f"[!] Error: {e}")
         sys.exit(1)
+
+    cpu_info = FFmpegEngine.get_cpu_hardware_info()
+    print(f"[*] Host CPU: {cpu_info.name} ({cpu_info.arch}) | Logical Cores: {cpu_info.logical_cores} | Vendor: {cpu_info.vendor.upper()}")
 
     # 2. Parse script
     script_path = Path(args.script)
@@ -183,7 +186,12 @@ def main():
     parser.add_argument("--output", type=str, default="final_synchronized_video.mp4", help="Final single output video path")
     parser.add_argument("--res", choices=["1080p", "2k", "4k", "vertical_1080p", "vertical_4k"], default="2k", help="Resolution preset")
     parser.add_argument("--fps", type=int, default=30, help="Video frame rate (24, 30, 60)")
-    parser.add_argument("--encoder", type=str, default="libx264", help="Video encoder (libx264, h264_nvenc, h264_qsv, h264_amf)")
+    parser.add_argument(
+        "--encoder",
+        type=str,
+        default="libx264",
+        help="Video encoder: libx264, libx265, h264_amf, hevc_amf (AMD), h264_qsv, hevc_qsv (Intel), h264_nvenc, hevc_nvenc (NVIDIA)"
+    )
     parser.add_argument("--crf", type=int, default=18, help="CRF / Constant Quality value (16-28)")
     parser.add_argument("--scaling", choices=["fit", "fill", "stretch"], default="fit", help="Aspect scaling mode")
     parser.add_argument("--ken-burns", action="store_true", help="Enable subtle Ken Burns motion effect on images")

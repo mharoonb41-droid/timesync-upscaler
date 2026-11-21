@@ -242,37 +242,46 @@ class MainWindow(QMainWindow):
         st_layout.setVerticalSpacing(8)
         st_layout.setHorizontalSpacing(8)
 
+        # Processor & Hardware Acceleration Banner
+        self.cpu_hardware_lbl = QLabel("🖥️ Processor: Detecting system CPU...")
+        self.cpu_hardware_lbl.setWordWrap(True)
+        self.cpu_hardware_lbl.setStyleSheet(
+            "color: #38bdf8; font-size: 11px; font-weight: 600; padding: 6px 8px; "
+            "background-color: #0b0f19; border: 1px solid #334155; border-radius: 6px;"
+        )
+        st_layout.addWidget(self.cpu_hardware_lbl, 0, 0, 1, 2)
+
         # Resolution Presets
-        st_layout.addWidget(QLabel("Resolution:"), 0, 0)
+        st_layout.addWidget(QLabel("Resolution:"), 1, 0)
         self.res_combo = NoScrollComboBox()
         for label in RESOLUTION_PRESETS.keys():
             self.res_combo.addItem(label)
         self.res_combo.setCurrentText("2K QHD (2560x1440) [16:9]")
-        st_layout.addWidget(self.res_combo, 0, 1)
+        st_layout.addWidget(self.res_combo, 1, 1)
 
         # Frame Rate
-        st_layout.addWidget(QLabel("Frame Rate:"), 1, 0)
+        st_layout.addWidget(QLabel("Frame Rate:"), 2, 0)
         self.fps_combo = NoScrollComboBox()
         self.fps_combo.addItems(["24 fps", "30 fps", "60 fps"])
         self.fps_combo.setCurrentText("30 fps")
-        st_layout.addWidget(self.fps_combo, 1, 1)
+        st_layout.addWidget(self.fps_combo, 2, 1)
 
         # Scaling Mode
-        st_layout.addWidget(QLabel("Scaling Mode:"), 2, 0)
+        st_layout.addWidget(QLabel("Scaling Mode:"), 3, 0)
         self.scaling_combo = NoScrollComboBox()
         self.scaling_combo.addItem("Fit (Letterbox/Pillars)", "fit")
         self.scaling_combo.addItem("Fill (Crop Canvas)", "fill")
         self.scaling_combo.addItem("Stretch", "stretch")
-        st_layout.addWidget(self.scaling_combo, 2, 1)
+        st_layout.addWidget(self.scaling_combo, 3, 1)
 
         # Hardware Encoder
-        st_layout.addWidget(QLabel("Encoder:"), 3, 0)
+        st_layout.addWidget(QLabel("Processor / GPU:"), 4, 0)
         self.encoder_combo = NoScrollComboBox()
         self.encoder_combo.addItem("CPU libx264 (Software Default)", "libx264")
-        st_layout.addWidget(self.encoder_combo, 3, 1)
+        st_layout.addWidget(self.encoder_combo, 4, 1)
 
         # Quality / CRF Slider
-        st_layout.addWidget(QLabel("CRF Quality:"), 4, 0)
+        st_layout.addWidget(QLabel("CRF Quality:"), 5, 0)
         crf_row = QHBoxLayout()
         self.crf_slider = NoScrollSlider(Qt.Horizontal)
         self.crf_slider.setRange(16, 28)
@@ -282,26 +291,26 @@ class MainWindow(QMainWindow):
         self.crf_slider.valueChanged.connect(lambda v: self.crf_val_lbl.setText(f"{v}"))
         crf_row.addWidget(self.crf_slider)
         crf_row.addWidget(self.crf_val_lbl)
-        st_layout.addLayout(crf_row, 4, 1)
+        st_layout.addLayout(crf_row, 5, 1)
 
         # Multiprocessing Worker Pool
-        st_layout.addWidget(QLabel("Worker Processes:"), 5, 0)
+        st_layout.addWidget(QLabel("Worker Processes:"), 6, 0)
         self.workers_spin = NoScrollSpinBox()
         cpu_total = os.cpu_count() or 4
         self.workers_spin.setRange(1, cpu_total)
         self.workers_spin.setValue(max(1, cpu_total - 1))
-        st_layout.addWidget(self.workers_spin, 5, 1)
+        st_layout.addWidget(self.workers_spin, 6, 1)
 
         # Ken Burns Motion Effect
         self.ken_burns_chk = QCheckBox("Ken Burns Motion (Subtle zoom/pan for images)")
         self.ken_burns_chk.setChecked(False)
-        st_layout.addWidget(self.ken_burns_chk, 6, 0, 1, 2)
+        st_layout.addWidget(self.ken_burns_chk, 7, 0, 1, 2)
 
         # Restore Defaults Button
         self.restore_defaults_btn = QPushButton("↺ Restore Default Settings")
         self.restore_defaults_btn.setToolTip("Reset all resolution, frame rate, encoder, CRF, and motion settings to default")
         self.restore_defaults_btn.clicked.connect(self._restore_default_settings)
-        st_layout.addWidget(self.restore_defaults_btn, 7, 0, 1, 2)
+        st_layout.addWidget(self.restore_defaults_btn, 8, 0, 1, 2)
 
         layout.addWidget(settings_group)
         layout.addStretch()
@@ -462,29 +471,45 @@ class MainWindow(QMainWindow):
     # ---------------- Hardware & Media Handlers ----------------
     def _detect_hardware_encoders(self):
         try:
-            encoders = FFmpegEngine.detect_available_encoders()
-            self.encoder_combo.clear()
-            for enc in encoders:
-                label = enc
-                if "nvenc" in enc:
-                    label = f"NVIDIA NVENC ({enc})"
-                elif "qsv" in enc:
-                    label = f"Intel QuickSync ({enc})"
-                elif "amf" in enc:
-                    label = f"AMD AMF ({enc})"
-                elif "libx264" in enc:
-                    label = "CPU libx264 (Software Default)"
-                elif "libx265" in enc:
-                    label = "CPU libx265 (Software HEVC)"
-                self.encoder_combo.addItem(label, enc)
+            cpu_info = FFmpegEngine.get_cpu_hardware_info()
+            options = FFmpegEngine.get_encoder_options()
 
-            for i in range(self.encoder_combo.count()):
-                if "nvenc" in self.encoder_combo.itemData(i):
-                    self.encoder_combo.setCurrentIndex(i)
-                    break
-            self.log_console.log(f"Detected video encoders: {', '.join(encoders)}", "INFO")
+            # Update CPU banner in the UI
+            arch_tag = "AMD Ryzen Engine" if cpu_info.is_amd else ("Intel Core Engine" if cpu_info.is_intel else "Multi-Core CPU")
+            self.cpu_hardware_lbl.setText(
+                f"🖥️ CPU: {cpu_info.cpu_name}\n"
+                f"⚡ {cpu_info.threads} Cores/Threads | {arch_tag} | AMD AMF & Intel Ready"
+            )
+
+            self.encoder_combo.clear()
+            rec_index = 0
+
+            for i, opt in enumerate(options):
+                status_suffix = ""
+                if opt.is_verified:
+                    status_suffix = " ✓ [Hardware Active]"
+                elif opt.is_hardware:
+                    status_suffix = " (Hardware Engine)"
+
+                if opt.is_recommended:
+                    status_suffix += " ★ [Recommended]"
+                    rec_index = i
+
+                display_text = f"{opt.label}{status_suffix}"
+                self.encoder_combo.addItem(display_text, opt.key)
+
+            self.encoder_combo.setCurrentIndex(rec_index)
+
+            self.log_console.log(
+                f"System Processor Detected: {cpu_info.cpu_name} ({cpu_info.threads} threads, {cpu_info.vendor} Architecture)",
+                "INFO"
+            )
+            self.log_console.log(
+                "Hardware Pipelines Available: AMD AMF (Radeon / Ryzen APU), Intel QuickSync, NVIDIA NVENC, and Multi-Core CPU.",
+                "SUCCESS"
+            )
         except Exception as e:
-            self.log_console.log(f"Encoder detection warning: {e}", "WARNING")
+            self.log_console.log(f"Encoder detection notice: {e}", "WARNING")
 
     def _restore_default_settings(self):
         """Restores all video export and motion settings to recommended defaults."""
@@ -498,10 +523,10 @@ class MainWindow(QMainWindow):
         self.ken_burns_chk.setChecked(False)
         self.sync_last_chk.setChecked(True)
 
-        # Restore encoder to hardware if available, otherwise libx264
-        for i in range(self.encoder_combo.count()):
-            data = self.encoder_combo.itemData(i)
-            if data and "nvenc" in data:
+        # Restore encoder to recommended option
+        options = FFmpegEngine.get_encoder_options()
+        for i, opt in enumerate(options):
+            if opt.is_recommended:
                 self.encoder_combo.setCurrentIndex(i)
                 break
         else:

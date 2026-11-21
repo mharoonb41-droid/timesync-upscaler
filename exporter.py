@@ -1,5 +1,5 @@
 """
-exporter.py - FFmpeg media processing, hardware encoder detection,
+exporter.py - FFmpeg media processing, CPU & GPU hardware detection (AMD Ryzen / Intel / NVIDIA),
 upscaling filter synthesis (Lanczos/Ken Burns), and stream-copy concatenation.
 """
 
@@ -13,7 +13,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 @dataclass
@@ -33,6 +33,25 @@ class ExportConfig:
     output_path: str = "output_synchronized.mp4"
 
 
+@dataclass
+class CPUHardwareInfo:
+    cpu_name: str
+    vendor: str          # "AMD", "Intel", or "Generic"
+    threads: int
+    is_amd: bool
+    is_intel: bool
+
+
+@dataclass
+class EncoderOption:
+    key: str
+    label: str
+    category: str        # "AMD", "Intel", "NVIDIA", "CPU"
+    is_hardware: bool
+    is_verified: bool
+    is_recommended: bool = False
+
+
 RESOLUTION_PRESETS = {
     "1080p FHD (1920x1080) [16:9]": (1920, 1080),
     "2K QHD (2560x1440) [16:9]": (2560, 1440),
@@ -45,18 +64,19 @@ RESOLUTION_PRESETS = {
 
 
 class FFmpegEngine:
-    """Manages FFmpeg interactions, encoder detection, chunk rendering, and merge."""
+    """Manages FFmpeg interactions, AMD/Intel/NVIDIA hardware detection, chunk rendering, and merge."""
 
     _cached_encoders: Optional[List[str]] = None
+    _cached_encoder_options: Optional[List[EncoderOption]] = None
+    _cached_cpu_info: Optional[CPUHardwareInfo] = None
 
     @classmethod
     def get_ffmpeg_path(cls) -> str:
-        # 1. Check PyInstaller bundle directory or application directory
         candidates = []
         if hasattr(sys, "_MEIPASS"):
             candidates.append(os.path.join(sys._MEIPASS, "ffmpeg.exe"))
             candidates.append(os.path.join(sys._MEIPASS, "bin", "ffmpeg.exe"))
-        
+
         exe_dir = os.path.dirname(sys.executable)
         candidates.append(os.path.join(exe_dir, "ffmpeg.exe"))
         candidates.append(os.path.join(exe_dir, "bin", "ffmpeg.exe"))
@@ -69,12 +89,10 @@ class FFmpegEngine:
             if os.path.isfile(c):
                 return c
 
-        # 2. Check system PATH
         ffmpeg = shutil.which("ffmpeg")
         if ffmpeg:
             return ffmpeg
 
-        # 3. Check common Windows install paths
         common_paths = [
             r"C:\ffmpeg\bin\ffmpeg.exe",
             r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
@@ -119,47 +137,146 @@ class FFmpegEngine:
         return "ffprobe"
 
     @classmethod
-    def detect_available_encoders(cls) -> List[str]:
-        """Probes FFmpeg for available H.264 and HEVC hardware and software encoders."""
-        if cls._cached_encoders is not None:
-            return cls._cached_encoders
+    def get_cpu_hardware_info(cls) -> CPUHardwareInfo:
+        """Detects system processor name, vendor (AMD vs Intel), and thread count."""
+        if cls._cached_cpu_info is not None:
+            return cls._cached_cpu_info
+
+        cpu_name = "Multi-Core Processor"
+        vendor = "Generic"
+
+        if sys.platform == "win32":
+            try:
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+                cpu_name = winreg.QueryValueEx(key, "ProcessorNameString")[0].strip()
+                v_id = winreg.QueryValueEx(key, "VendorIdentifier")[0].strip()
+                if "AMD" in v_id.upper() or "AMD" in cpu_name.upper():
+                    vendor = "AMD"
+                elif "INTEL" in v_id.upper() or "INTEL" in cpu_name.upper():
+                    vendor = "Intel"
+            except Exception:
+                pass
+
+        if vendor == "Generic":
+            ident = os.environ.get("PROCESSOR_IDENTIFIER", "") + " " + sys.platform
+            if "AMD" in ident.upper():
+                vendor = "AMD"
+            elif "INTEL" in ident.upper():
+                vendor = "Intel"
+
+        threads = os.cpu_count() or 4
+        info = CPUHardwareInfo(
+            cpu_name=cpu_name,
+            vendor=vendor,
+            threads=threads,
+            is_amd=(vendor == "AMD"),
+            is_intel=(vendor == "Intel")
+        )
+        cls._cached_cpu_info = info
+        return info
+
+    @classmethod
+    def get_encoder_options(cls) -> List[EncoderOption]:
+        """
+        Returns full list of available encoders organized by hardware vendor:
+        AMD AMF (Radeon / Ryzen APU), Intel QuickSync (Core / Arc), NVIDIA NVENC, and CPU Multi-Core.
+        """
+        if cls._cached_encoder_options is not None:
+            return cls._cached_encoder_options
 
         ffmpeg = cls.get_ffmpeg_path()
-        candidates = [
-            ("NVIDIA NVENC (H.264)", "h264_nvenc"),
-            ("NVIDIA NVENC (HEVC/H.265)", "hevc_nvenc"),
-            ("Intel QuickSync (H.264)", "h264_qsv"),
-            ("Intel QuickSync (HEVC)", "hevc_qsv"),
-            ("AMD AMF (H.264)", "h264_amf"),
-            ("AMD AMF (HEVC)", "hevc_amf"),
-            ("Apple VideoToolbox (H.264)", "h264_videotoolbox"),
-            ("CPU Software (libx264 - Default)", "libx264"),
-            ("CPU Software (libx265)", "libx265"),
-        ]
+        cpu_info = cls.get_cpu_hardware_info()
 
-        verified_encoders: List[str] = []
-
+        # Query all encoders compiled into FFmpeg
+        compiled_encoders = set()
         try:
             cmd = [ffmpeg, "-hide_banner", "-encoders"]
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
             output = res.stdout + res.stderr
-
-            for label, enc in candidates:
-                if enc in output:
-                    if cls._test_encoder(ffmpeg, enc):
-                        verified_encoders.append(enc)
+            for line in output.splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0].startswith("V"):
+                    compiled_encoders.add(parts[1])
         except Exception:
             pass
 
-        if "libx264" not in verified_encoders:
-            verified_encoders.append("libx264")
+        # Candidates definition: (key, base_label, category, is_hardware)
+        candidates = [
+            # AMD Hardware Acceleration (AMD AMF for Ryzen APUs and Radeon GPUs)
+            ("h264_amf", "AMD AMF (H.264 / AVC - AMD Radeon/Ryzen)", "AMD", True),
+            ("hevc_amf", "AMD AMF (HEVC / H.265 - AMD Radeon/Ryzen)", "AMD", True),
+            ("av1_amf", "AMD AMF (AV1 Next-Gen - AMD Radeon/Ryzen)", "AMD", True),
 
-        cls._cached_encoders = verified_encoders
-        return verified_encoders
+            # Intel Hardware Acceleration (Intel QuickSync for Core CPUs and Arc GPUs)
+            ("h264_qsv", "Intel QuickSync (H.264 / AVC - Intel Core/Arc)", "Intel", True),
+            ("hevc_qsv", "Intel QuickSync (HEVC / H.265 - Intel Core/Arc)", "Intel", True),
+            ("av1_qsv", "Intel QuickSync (AV1 Next-Gen - Intel Core/Arc)", "Intel", True),
+
+            # NVIDIA Hardware Acceleration (NVENC for GeForce / RTX GPUs)
+            ("h264_nvenc", "NVIDIA NVENC (H.264 / AVC - GeForce/RTX)", "NVIDIA", True),
+            ("hevc_nvenc", "NVIDIA NVENC (HEVC / H.265 - GeForce/RTX)", "NVIDIA", True),
+            ("av1_nvenc", "NVIDIA NVENC (AV1 Next-Gen - GeForce/RTX)", "NVIDIA", True),
+
+            # Universal Multi-Core CPU Software Encoding
+            ("libx264", f"CPU Software (AMD Ryzen & Intel Optimized - libx264)", "CPU", False),
+            ("libx265", f"CPU Software (High Efficiency Multi-Core - libx265)", "CPU", False),
+        ]
+
+        options: List[EncoderOption] = []
+        has_recommended = False
+
+        for key, label, category, is_hw in candidates:
+            # Check if encoder is compiled in FFmpeg
+            if key in compiled_encoders or not is_hw:
+                is_active = cls._test_encoder(ffmpeg, key) if is_hw else True
+                
+                # Check recommendation based on detected processor/GPU
+                is_rec = False
+                if not has_recommended:
+                    if is_active and is_hw:
+                        if category == "AMD" and cpu_info.is_amd:
+                            is_rec = True
+                            has_recommended = True
+                        elif category == "Intel" and cpu_info.is_intel:
+                            is_rec = True
+                            has_recommended = True
+                        elif category == "NVIDIA":
+                            is_rec = True
+                            has_recommended = True
+
+                options.append(EncoderOption(
+                    key=key,
+                    label=label,
+                    category=category,
+                    is_hardware=is_hw,
+                    is_verified=is_active,
+                    is_recommended=is_rec
+                ))
+
+        # Default fallback recommendation if no hardware encoder was pre-recommended
+        if not has_recommended:
+            for opt in options:
+                if opt.key == "libx264":
+                    opt.is_recommended = True
+                    break
+
+        cls._cached_encoder_options = options
+        return options
+
+    @classmethod
+    def detect_available_encoders(cls) -> List[str]:
+        """Returns list of encoder keys for backward compatibility."""
+        if cls._cached_encoders is not None:
+            return cls._cached_encoders
+        options = cls.get_encoder_options()
+        keys = [opt.key for opt in options]
+        cls._cached_encoders = keys
+        return keys
 
     @classmethod
     def _test_encoder(cls, ffmpeg_bin: str, encoder: str) -> bool:
-        """Runs a 1-frame null test with the given encoder to verify hardware support."""
+        """Runs a 1-frame null test with the given encoder to verify active hardware driver support."""
         if encoder in ("libx264", "libx265"):
             return True
         cmd = [
@@ -253,7 +370,7 @@ class FFmpegEngine:
     ) -> bool:
         """
         Renders an internal frame-accurate segment chunk into temporary MPEG-TS (.ts)
-        using Lanczos upscaling and selected hardware/CPU encoder.
+        using Lanczos upscaling and selected hardware (AMD AMF / Intel QSV / NVIDIA NVENC) or multi-core CPU.
         """
         ffmpeg = cls.get_ffmpeg_path()
         filter_str = cls.build_video_filter(
@@ -308,17 +425,23 @@ class FFmpegEngine:
                 "-g", str(config.fps * 2),
             ]
         elif "amf" in enc:
+            # AMD Advanced Media Framework (AMF) hardware encoding for AMD Ryzen APUs and Radeon GPUs
             cmd += [
                 "-c:v", enc,
+                "-rc", "cqp",
+                "-qp_i", str(config.crf),
+                "-qp_p", str(config.crf),
                 "-quality", "quality",
-                "-rc", "cbr",
+                "-usage", "transcoding",
                 "-g", str(config.fps * 2),
             ]
         else:
+            # CPU Software: Optimized for multi-threaded AMD Ryzen and Intel multi-core CPUs
             cmd += [
                 "-c:v", enc,
                 "-crf", str(config.crf),
                 "-preset", config.preset or "medium",
+                "-threads", "0",
                 "-g", str(config.fps * 2),
             ]
 
@@ -327,6 +450,7 @@ class FFmpegEngine:
         try:
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             if res.returncode != 0:
+                # Graceful fallback to multi-core CPU encoding if selected hardware is not active
                 if enc != "libx264":
                     cmd_fallback = [
                         ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
@@ -337,6 +461,7 @@ class FFmpegEngine:
                         "-c:v", "libx264",
                         "-crf", str(config.crf),
                         "-preset", "veryfast",
+                        "-threads", "0",
                         "-f", "mpegts", output_ts_path
                     ]
                     res2 = subprocess.run(cmd_fallback, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -356,19 +481,15 @@ class FFmpegEngine:
     ) -> Tuple[bool, str]:
         """
         Stage 2 (Single Final Output): Combines all internal segments into exactly ONE final video.
-        Seamlessly muxes the voiceover audio (with automatic padding/trimming to prevent video cut-off).
-        No temporary files are left in the user directory.
+        Seamlessly muxes voiceover audio (with automatic padding/trimming to prevent video cut-off).
         """
         if not segment_paths:
             return False, "No segment files provided for concatenation."
 
         ffmpeg = cls.get_ffmpeg_path()
-
-        # Place the concat index file inside the OS temp directory
         temp_dir = Path(tempfile.gettempdir())
         concat_txt = temp_dir / f"timesync_concat_{os.getpid()}_{int(time.time() * 1000)}.txt"
 
-        # Ensure target directory exists
         Path(output_file).parent.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -388,7 +509,6 @@ class FFmpegEngine:
                 audio_dur = cls.get_media_duration(audio_file)
                 if total_duration and total_duration > 0:
                     if audio_dur is not None and audio_dur < total_duration:
-                        # Audio is shorter than video: pad with silence so video plays full length
                         cmd += [
                             "-i", str(Path(audio_file).resolve()),
                             "-filter_complex", f"[1:a]apad=whole_dur={total_duration:.3f}[a]",
@@ -400,7 +520,6 @@ class FFmpegEngine:
                             "-t", f"{total_duration:.3f}",
                         ]
                     else:
-                        # Audio is equal or longer: trim audio exactly to video length
                         cmd += [
                             "-i", str(Path(audio_file).resolve()),
                             "-map", "0:v:0",
